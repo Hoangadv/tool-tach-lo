@@ -11,29 +11,28 @@ from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
 # --- CẤU HÌNH TRANG WEB ---
-st.set_page_config(page_title="Tool Tách LO PDF", page_icon="📄")
+st.set_page_config(page_title="Tool Tách LO PDF (V2)", page_icon="🛠️")
 
-st.title("📄 Tool Tách File PDF theo LO")
-st.markdown("""
-**Hướng dẫn:**
-1. Upload file PDF "Check Refund Backup".
-2. Nhập "Ngày Batch" (nếu cần thay đổi).
-3. Bấm **Xử lý** và tải về file ZIP.
-""")
+st.title("🛠️ Tool Tách File PDF theo LO (Bản V2)")
+st.info("Phiên bản này có tính năng 'Dò tìm thông minh' để sửa lỗi không thấy mã LO.")
 
-# --- HÀM TẠO TRANG 1 (GIỐNG CŨ) ---
-def create_page_1(data_row, header_row, temp_filename):
+# --- HÀM TẠO TRANG 1 ---
+def create_page_1(data_row, header_row, temp_filename, lo_index):
     doc = SimpleDocTemplate(temp_filename, pagesize=landscape(letter))
     elements = []
     styles = getSampleStyleSheet()
     
-    # Lấy số LO (cột 7) để làm tiêu đề
-    lo_number = data_row[7] if len(data_row) > 7 else "UNKNOWN"
+    # Lấy số LO từ vị trí cột đã tìm thấy
+    lo_number = data_row[lo_index] if len(data_row) > lo_index else "UNKNOWN"
     title = Paragraph(f"<b>LO REFUND DETAIL: {lo_number}</b>", styles['Heading1'])
     elements.append(title)
     elements.append(Spacer(1, 20))
 
-    table_data = [header_row, data_row]
+    # Chỉ lấy các cột có dữ liệu để bảng đẹp hơn (tránh cột None)
+    clean_header = [h if h else "" for h in header_row]
+    clean_data = [d if d else "" for d in data_row]
+
+    table_data = [clean_header, clean_data]
     t = Table(table_data)
     t.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
@@ -43,7 +42,7 @@ def create_page_1(data_row, header_row, temp_filename):
         ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
         ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
         ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('FONTSIZE', (0, 0), (-1, -1), 7), # Giảm font xíu để vừa bảng
     ]))
     elements.append(t)
     doc.build(elements)
@@ -52,84 +51,112 @@ def create_page_1(data_row, header_row, temp_filename):
 uploaded_file = st.file_uploader("Chọn file PDF gốc", type=["pdf"])
 
 if uploaded_file is not None:
-    # Gợi ý ngày batch từ tên file (lấy 6 ký tự đầu)
+    # Gợi ý ngày batch
     default_date = uploaded_file.name[:6] if uploaded_file.name[:6].isdigit() else "112425"
-    batch_date = st.text_input("Ngày Batch (để đặt tên file)", value=default_date)
+    batch_date = st.text_input("Ngày Batch", value=default_date)
 
     if st.button("🚀 Xử lý ngay"):
-        with st.spinner('Đang tách file... vui lòng chờ'):
-            # Tạo thư mục tạm để xử lý
+        with st.spinner('Đang phân tích bảng dữ liệu...'):
             with tempfile.TemporaryDirectory() as temp_dir:
-                # Lưu file upload xuống tạm thời để thư viện đọc
                 input_path = os.path.join(temp_dir, "input.pdf")
                 with open(input_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
-                # 1. Đọc dữ liệu bảng
                 extracted_rows = []
                 header = []
+                lo_col_index = -1 # Chưa tìm thấy
+
+                # 1. Đọc và gỡ lỗi (Debug) dữ liệu bảng
                 with pdfplumber.open(input_path) as pdf:
-                    page1 = pdf.pages[0] # Giả định bảng ở trang 1
-                    table = page1.extract_table()
+                    page1 = pdf.pages[0]
+                    # Thử chế độ snap=True để bắt bảng tốt hơn
+                    table = page1.extract_table(table_settings={"vertical_strategy": "text", "horizontal_strategy": "text"})
+                    
+                    if not table:
+                        # Thử lại với chế độ mặc định nếu chế độ text fail
+                        table = page1.extract_table()
+
                     if table:
-                        start_row_index = 0
+                        # --- LOGIC DÒ TÌM HEADER THÔNG MINH ---
+                        header_row_idx = -1
+                        st.write("🔍 **Đang kiểm tra cấu trúc bảng...**")
+                        
                         for i, row in enumerate(table):
-                            if row and "Vendor No." in str(row):
+                            # Làm sạch row để tìm kiếm
+                            row_str = [str(c).strip() for c in row if c]
+                            
+                            # Tìm dòng chứa chữ "LO" (Đây là dấu hiệu nhận biết header)
+                            if "LO" in row_str:
                                 header = row
-                                start_row_index = i + 1
+                                header_row_idx = i
+                                
+                                # Tìm vị trí cột LO nằm ở đâu
+                                for idx, col_name in enumerate(row):
+                                    if col_name and "LO" == col_name.strip():
+                                        lo_col_index = idx
+                                        break
+                                
+                                st.success(f"✅ Đã tìm thấy Header ở dòng {i+1}. Cột LO nằm ở vị trí số {lo_col_index+1}")
                                 break
-                        for row in table[start_row_index:]:
-                            # Kiểm tra cột LO (index 7) có dữ liệu số không
-                            if row and len(row) > 7 and row[7] is not None:
-                                clean_lo = row[7].strip().replace('\n', '')
-                                if clean_lo.isdigit():
-                                    # Cập nhật lại giá trị sạch vào row
-                                    row[7] = clean_lo 
-                                    extracted_rows.append(row)
+                        
+                        if lo_col_index == -1:
+                            st.error("❌ Không tìm thấy cột nào tên là 'LO' trong bảng. Vui lòng kiểm tra lại file PDF.")
+                            st.write("Dữ liệu 5 dòng đầu tiên đọc được là:")
+                            st.write(table[:5]) # In ra để debug
+                            st.stop()
 
-                st.write(f"✅ Tìm thấy {len(extracted_rows)} mã LO.")
+                        # --- LẤY DỮ LIỆU ---
+                        for row in table[header_row_idx + 1:]:
+                            # Phải có đủ số cột và cột LO không được trống
+                            if row and len(row) > lo_col_index:
+                                raw_lo = row[lo_col_index]
+                                if raw_lo:
+                                    clean_lo = str(raw_lo).strip().replace('\n', '')
+                                    # Chấp nhận nếu là số (ví dụ '016')
+                                    if clean_lo.isdigit():
+                                        row[lo_col_index] = clean_lo
+                                        extracted_rows.append(row)
+                    else:
+                        st.error("❌ Không đọc được bảng nào từ trang 1 PDF.")
+                        st.stop()
 
-                # 2. Lấy 2 trang cuối
+                st.write(f"📊 **Kết quả:** Tìm thấy {len(extracted_rows)} dòng dữ liệu hợp lệ.")
+
+                if not extracted_rows:
+                    st.warning("⚠️ Không có dòng dữ liệu nào bên dưới Header có chứa mã LO là số.")
+                    st.stop()
+
+                # 2. Xử lý tách file
                 reader = PdfReader(input_path)
-                total_pages = len(reader.pages)
-                if total_pages < 3:
-                    st.error("File quá ngắn (< 3 trang), không thể tách.")
+                if len(reader.pages) < 3:
+                    st.error("File quá ngắn (< 3 trang).")
                     st.stop()
                 
-                last_page = reader.pages[total_pages - 1]
-                second_last_page = reader.pages[total_pages - 2]
+                last_page = reader.pages[-1]
+                second_last_page = reader.pages[-2]
 
-                # 3. Tạo file ZIP trong bộ nhớ
                 zip_buffer = BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    
-                    # Vòng lặp tạo PDF
                     for row in extracted_rows:
-                        lo_id = row[7]
+                        lo_id = row[lo_col_index]
                         pdf_name = f"{batch_date}-{lo_id}.pdf"
                         temp_page1_path = os.path.join(temp_dir, "temp_page1.pdf")
                         
                         try:
-                            # Tạo trang 1
-                            create_page_1(row, header, temp_page1_path)
+                            # Truyền thêm lo_col_index vào hàm tạo trang
+                            create_page_1(row, header, temp_page1_path, lo_col_index)
                             
-                            # Ghép file
                             merger = PdfWriter()
-                            merger.add_page(PdfReader(temp_page1_path).pages[0]) # Trang 1 mới
-                            merger.add_page(second_last_page) # Trang áp chót cũ
-                            merger.add_page(last_page) # Trang cuối cũ
+                            merger.add_page(PdfReader(temp_page1_path).pages[0])
+                            merger.add_page(second_last_page)
+                            merger.add_page(last_page)
 
-                            # Lưu vào buffer
                             output_pdf_buffer = BytesIO()
                             merger.write(output_pdf_buffer)
-                            
-                            # Đưa vào file ZIP
                             zip_file.writestr(pdf_name, output_pdf_buffer.getvalue())
                         except Exception as e:
-                            st.warning(f"Lỗi khi tạo LO {lo_id}: {e}")
+                            st.warning(f"Lỗi tạo file {lo_id}: {e}")
 
-                # 4. Hiển thị nút Download
-                st.success("🎉 Xử lý xong!")
                 st.download_button(
                     label="📥 Tải xuống tất cả (ZIP)",
                     data=zip_buffer.getvalue(),
